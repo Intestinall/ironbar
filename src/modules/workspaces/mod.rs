@@ -18,7 +18,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
 use tokio::sync::mpsc;
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, trace, warn};
+
+const ICON_MAP_DEFAULT: &str = "";
 
 #[derive(Debug, Deserialize, Default, Clone, Copy, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -102,6 +104,9 @@ pub struct WorkspacesModule {
     /// it will fall back to using its actual name.
     #[serde(default)]
     name_map: HashMap<String, String>,
+
+    #[serde(default)]
+    icon_map: HashMap<String, String>,
 
     /// Workspaces which should always be shown.
     /// This can either be an array of workspace names,
@@ -188,6 +193,7 @@ impl Default for WorkspacesModule {
     fn default() -> Self {
         Self {
             name_map: HashMap::default(),
+            icon_map: HashMap::default(),
             favorites: Favorites::default(),
             hidden: vec![],
             all_monitors: false,
@@ -203,6 +209,7 @@ impl Default for WorkspacesModule {
 #[derive(Debug, Clone)]
 pub struct WorkspaceItemContext {
     name_map: HashMap<String, String>,
+    icon_map: HashMap<String, String>,
     icon_size: i32,
     image_provider: image::Provider,
     tx: mpsc::Sender<i64>,
@@ -221,10 +228,49 @@ impl WorkspaceItemContext {
             &self.format_unnamed
         };
 
-        format
+        let rendered = format
             .replace("{label}", label)
             .replace("{name}", name)
-            .replace("{index}", &index.to_string())
+            .replace("{index}", &index.to_string());
+
+        if format.contains("{icons}") {
+            let icons = self.get_all_icons_from_workspace(index);
+            return rendered.replace("{icons}", &icons);
+        }
+        rendered
+    }
+
+    fn get_all_icons_from_workspace(&self, client_id: i64) -> String {
+        use hyprland::data::{Client, Clients};
+        use hyprland::shared::HyprData;
+
+        let clients: Vec<Client> = match Clients::get() {
+            Ok(client) => client
+                .into_iter()
+                .filter(|x| x.workspace.id as i64 == client_id)
+                .collect(),
+            Err(err) => {
+                error!("Failed to start fetch hyprland clients: {err:#}");
+                return String::new();
+            }
+        };
+
+        let mut icons_string = String::new();
+        let default_icon = self
+            .icon_map
+            .get("<default>")
+            .map(|s| s.as_str())
+            .unwrap_or(ICON_MAP_DEFAULT);
+        for client in clients {
+            let icon = self
+                .icon_map
+                .get(client.class.as_str())
+                .map(|s| s.as_str())
+                .unwrap_or(default_icon);
+            icons_string.push_str(icon);
+            icons_string.push_str("  ");
+        }
+        icons_string.trim_end().to_string()
     }
 }
 
@@ -330,6 +376,7 @@ impl Module<gtk::Box> for WorkspacesModule {
 
         let item_context = WorkspaceItemContext {
             name_map: self.name_map.clone(),
+            icon_map: self.icon_map.clone(),
             icon_size: self.icon_size,
             image_provider: context.ironbar.image_provider(),
             tx: context.controller_tx.clone(),
@@ -514,7 +561,11 @@ impl Module<gtk::Box> for WorkspacesModule {
                             }
                         }
                     }
-                    WorkspaceUpdate::Rename { id, name } if has_initialized => {
+                    WorkspaceUpdate::Rename { id, name }
+                    | WorkspaceUpdate::AddWindow { id, name }
+                    | WorkspaceUpdate::RemoveWindow { id, name }
+                        if has_initialized =>
+                    {
                         let button = if let Some(button) = button_map.get_mut(&Identifier::Id(id)) {
                             Some(button)
                         } else {

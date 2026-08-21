@@ -18,6 +18,8 @@ use serde::Deserialize;
 use std::io::{Read, Write};
 #[cfg(feature = "workspaces+hyprland")]
 use std::os::unix::net::UnixStream;
+use hyprland::shared::{Address, HyprDataVec, WorkspaceType};
+use std::collections::HashMap;
 use tokio::sync::broadcast::{Receiver, Sender, channel};
 use tracing::{debug, error, info, warn};
 
@@ -108,6 +110,17 @@ impl Client {
         event_listener: &mut EventListener,
         lock: &std::sync::Arc<std::sync::Mutex<()>>,
     ) {
+        let mut window_cache: HashMap<Address, (i64, String)> = HashMap::new();
+        if let Ok(clients) = hyprland::data::Clients::get() {
+            for client in clients {
+                window_cache.insert(
+                    client.address,
+                    (client.workspace.id as i64, client.workspace.name),
+                );
+            }
+        }
+        let window_cache = arc_mut!(window_cache);
+
         let active = Self::get_active_workspace().map_or_else(
             |err| {
                 error!("Failed to get active workspace: {err:#?}");
@@ -210,6 +223,7 @@ impl Client {
         {
             let tx = tx.clone();
             let lock = lock.clone();
+            let active = active.clone();
 
             event_listener.add_workspace_moved_handler(move |event_data| {
                 let _lock = lock!(lock);
@@ -291,6 +305,112 @@ impl Client {
                         });
                     },
                 );
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let lock = lock.clone();
+            let window_cache = window_cache.clone(); // Clone your new cache pointer
+
+            event_listener.add_window_opened_handler(move |window_opened_event| {
+                let _lock = lock!(lock);
+                let mut cache = lock!(window_cache);
+
+                // TODO: Debug is bad
+                debug!("Received window opened: {window_opened_event:?}");
+                let workspace = Self::get_workspace(&window_opened_event.workspace_name, None);
+
+                match workspace {
+                    Ok(Some(workspace)) => {
+                        tx.send_expect(WorkspaceUpdate::AddWindow {
+                            id: workspace.id,
+                            name: workspace.name,
+                        });
+                        cache.insert(
+                            window_opened_event.window_address,
+                            (workspace.id, window_opened_event.workspace_name),
+                        );
+                    }
+                    Ok(None) => {
+                        error!("Unable to locate workspace");
+                    }
+                    Err(e) => error!("Failed to get workspace: {e:#}"),
+                }
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let lock = lock.clone();
+            let window_cache = window_cache.clone(); // Clone your new cache pointer
+
+            event_listener.add_window_closed_handler(move |window_closed_address| {
+                let _lock = lock!(lock);
+                let mut cache = lock!(window_cache);
+
+                match cache.remove_entry(&window_closed_address) {
+                    Some((_window_address, (old_workspace_id, old_workspace_name))) => {
+                        debug!("Window closed with address {window_closed_address}");
+                        tx.send_expect(WorkspaceUpdate::RemoveWindow {
+                            id: old_workspace_id,
+                            name: old_workspace_name,
+                        });
+                    }
+                    None => {
+                        error!("Window closed with address {window_closed_address} but not found in the cache");
+                    }
+                };
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let lock = lock.clone();
+            let window_cache = window_cache.clone(); // Clone your new cache pointer
+
+            event_listener.add_window_moved_handler(move |window_moved_event| {
+                let _lock = lock!(lock);
+                let workspace_type = window_moved_event.workspace_name;
+                let mut cache = lock!(window_cache);
+
+                let prev_workspace = lock!(active);
+
+                let workspace_name = get_workspace_name(workspace_type);
+                let new_workspace = Self::get_workspace(&workspace_name, prev_workspace.as_ref());
+
+                match new_workspace {
+                    Ok(Some(new_workspace)) => {
+                        match cache.remove_entry(&window_moved_event.window_address) {
+                            Some((window_address, (old_workspace_id, old_workspace_name))) => {
+                                debug!(
+                                    "Window moved from {} to {}",
+                                    &old_workspace_name, &new_workspace.name
+                                );
+                                tx.send_expect(WorkspaceUpdate::RemoveWindow {
+                                    id: old_workspace_id,
+                                    name: old_workspace_name,
+                                });
+                                tx.send_expect(WorkspaceUpdate::AddWindow {
+                                    id: new_workspace.id,
+                                    name: new_workspace.name.clone(),
+                                });
+                                cache
+                                    .insert(window_address, (new_workspace.id, new_workspace.name));
+                            }
+                            None => {
+                                error!(
+                                    "Window moved to {}, but old workspace was unknown",
+                                    new_workspace.name
+                                );
+                            }
+                        };
+                    }
+                    Ok(None) => {
+                        error!("Unable to locate workspace");
+                    }
+                    Err(e) => error!("Failed to get workspace: {e:#}"),
+                }
             });
         }
     }

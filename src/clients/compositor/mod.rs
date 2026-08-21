@@ -214,6 +214,16 @@ pub enum WorkspaceUpdate {
         urgent: bool,
     },
 
+    AddWindow {
+        id: i64,
+        name: String,
+    },
+
+    RemoveWindow {
+        id: i64,
+        name: String,
+    },
+
     /// An update was triggered by the compositor but this was not mapped by Ironbar.
     ///
     /// This is purely used for ergonomics within the compositor clients
