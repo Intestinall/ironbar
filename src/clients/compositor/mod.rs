@@ -152,6 +152,8 @@ pub struct Workspace {
     pub monitor: String,
     /// How visible the workspace is
     pub visibility: Visibility,
+    /// Classes of applications running in the workspace
+    pub classes: Vec<String>
 }
 
 /// Indicates workspace visibility.
@@ -206,6 +208,7 @@ pub enum WorkspaceUpdate {
     Rename {
         id: i64,
         name: String,
+        classes: Option<Vec<String>>,
     },
 
     /// The urgent state of a node changed.
@@ -217,11 +220,13 @@ pub enum WorkspaceUpdate {
     AddWindow {
         id: i64,
         name: String,
+        classes: Option<Vec<String>>,
     },
 
     RemoveWindow {
         id: i64,
         name: String,
+        classes: Option<Vec<String>>,
     },
 
     /// An update was triggered by the compositor but this was not mapped by Ironbar.

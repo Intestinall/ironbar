@@ -67,6 +67,7 @@ impl Client {
                                             updates.push(WorkspaceUpdate::Rename {
                                                 id: workspace.id,
                                                 name: workspace.name.clone(),
+                                                classes: None
                                             });
                                         }
 

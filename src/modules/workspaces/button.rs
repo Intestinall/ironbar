@@ -26,7 +26,7 @@ impl Button {
         open_state: OpenState,
         context: &WorkspaceItemContext,
     ) -> Self {
-        let label = context.format_label(name, index);
+        let label = context.format_label(name, index, None);
 
         let button = IconButton::new(&label, context.icon_size, &context.image_provider);
         button.set_widget_name(name);

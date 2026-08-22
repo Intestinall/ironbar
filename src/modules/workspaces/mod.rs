@@ -18,7 +18,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, trace, warn};
 
 const ICON_MAP_DEFAULT: &str = "";
 
@@ -218,7 +218,7 @@ pub struct WorkspaceItemContext {
 }
 
 impl WorkspaceItemContext {
-    pub fn format_label(&self, name: &str, index: i64) -> String {
+    pub fn format_label(&self, name: &str, index: i64, classes: Option<Vec<String>>) -> String {
         let label = self.name_map.get(name).map_or(name, String::as_str);
 
         let is_named = name != index.to_string();
@@ -234,37 +234,27 @@ impl WorkspaceItemContext {
             .replace("{index}", &index.to_string());
 
         if format.contains("{icons}") {
-            let icons = self.get_all_icons_from_workspace(index);
-            return rendered.replace("{icons}", &icons);
+            if let Some(classes) = classes {
+                let icons = self.classes_to_label(classes);
+                return rendered.replace("{icons}", &icons);
+            } else {
+                warn!("{{icons}} is used but the compositor hasn't implemented the feature yet")
+            }
         }
         rendered
     }
 
-    fn get_all_icons_from_workspace(&self, client_id: i64) -> String {
-        use hyprland::data::{Client, Clients};
-        use hyprland::shared::HyprData;
-
-        let clients: Vec<Client> = match Clients::get() {
-            Ok(client) => client
-                .into_iter()
-                .filter(|x| x.workspace.id as i64 == client_id)
-                .collect(),
-            Err(err) => {
-                error!("Failed to start fetch hyprland clients: {err:#}");
-                return String::new();
-            }
-        };
-
+    fn classes_to_label(&self, classes: Vec<String>) -> String {
         let mut icons_string = String::new();
         let default_icon = self
             .icon_map
             .get("<default>")
             .map(|s| s.as_str())
             .unwrap_or(ICON_MAP_DEFAULT);
-        for client in clients {
+        for class in classes {
             let icon = self
                 .icon_map
-                .get(client.class.as_str())
+                .get(class.as_str())
                 .map(|s| s.as_str())
                 .unwrap_or(default_icon);
             icons_string.push_str(icon);
@@ -437,12 +427,12 @@ impl Module<gtk::Box> for WorkspacesModule {
                         btn.set_workspace_id(workspace.id);
                         btn.set_monitor(&workspace.monitor);
                         btn.set_open_state(workspace.visibility.into());
-                        let label = item_context.format_label(&workspace.name, workspace.index);
+                        let label = item_context.format_label(&workspace.name, workspace.index, Some(workspace.classes));
                         btn.set_label(&label);
 
                         btn.button().set_tag("workspace_index", workspace.index);
                     } else if let Some(btn) = button_map.find_button_mut(&workspace) {
-                        let label = item_context.format_label(&workspace.name, workspace.index);
+                        let label = item_context.format_label(&workspace.name, workspace.index, Some(workspace.classes));
                         btn.set_label(&label);
                         btn.set_monitor(&workspace.monitor);
                         btn.button().set_tag("workspace_index", workspace.index);
@@ -561,9 +551,9 @@ impl Module<gtk::Box> for WorkspacesModule {
                             }
                         }
                     }
-                    WorkspaceUpdate::Rename { id, name }
-                    | WorkspaceUpdate::AddWindow { id, name }
-                    | WorkspaceUpdate::RemoveWindow { id, name }
+                    WorkspaceUpdate::Rename { id, name, classes }
+                    | WorkspaceUpdate::AddWindow { id, name, classes }
+                    | WorkspaceUpdate::RemoveWindow { id, name, classes }
                         if has_initialized =>
                     {
                         let button = if let Some(button) = button_map.get_mut(&Identifier::Id(id)) {
@@ -579,7 +569,7 @@ impl Module<gtk::Box> for WorkspacesModule {
                                 .copied()
                                 .unwrap_or(0);
 
-                            let display_name = item_context.format_label(&name, index);
+                            let display_name = item_context.format_label(&name, index, classes);
 
                             button.set_label(&display_name);
                             button.button().set_widget_name(&name);
