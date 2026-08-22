@@ -24,9 +24,10 @@ impl Button {
         name: &str,
         monitor: &str,
         open_state: OpenState,
+        classes: Option<Vec<String>>,
         context: &WorkspaceItemContext,
     ) -> Self {
-        let label = context.format_label(name, index, None);
+        let label = context.format_label(name, index, classes);
 
         let button = IconButton::new(&label, context.icon_size, &context.image_provider);
         button.set_widget_name(name);

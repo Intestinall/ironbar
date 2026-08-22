@@ -397,6 +397,7 @@ impl Module<gtk::Box> for WorkspacesModule {
                 favorite,
                 info.output_name,
                 OpenState::Closed,
+                Some(vec![]),
                 &item_context,
             );
 
@@ -443,6 +444,7 @@ impl Module<gtk::Box> for WorkspacesModule {
                             &workspace.name,
                             &workspace.monitor,
                             workspace.visibility.into(),
+                            Some(workspace.classes),
                             &item_context,
                         );
 
