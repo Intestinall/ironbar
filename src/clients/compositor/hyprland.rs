@@ -105,6 +105,22 @@ impl WindowCache {
             .map(|r| r.class.clone())
             .collect()
     }
+
+    pub fn update_class(
+        &mut self,
+        address: &Address,
+        new_class: String,
+    ) -> Option<(i64, String, Vec<String>)> {
+        let (ws_id, ws_name) = {
+            let record = self.inner.get_mut(address)?;
+            if record.class == new_class {
+                return None;
+            }
+            record.class = new_class;
+            (record.workspace_id, record.workspace_name.clone())
+        };
+        Some((ws_id, ws_name, self.get_classes_for_workspace(ws_id)))
+    }
 }
 
 
@@ -475,6 +491,34 @@ impl Client {
                         error!("Unable to locate workspace");
                     }
                     Err(e) => error!("Failed to get workspace: {e:#}"),
+                }
+            });
+        }
+        // Handles dynamic class changes
+        {
+            let tx = tx.clone();
+            let lock = lock.clone();
+            let window_cache = window_cache.clone();
+
+            event_listener.add_active_window_changed_handler(move |event_data| {
+                let _lock = lock!(lock);
+
+                let Some(event_data) = event_data else {
+                    return;
+                };
+
+                // Skip if class is still empty
+                if event_data.class.is_empty() {
+                    return;
+                }
+
+                let mut cache = lock!(window_cache);
+                if let Some((ws_id, ws_name, classes)) = cache.update_class(&event_data.address, event_data.class) {
+                    tx.send_expect(WorkspaceUpdate::AddWindow {
+                        id: ws_id,
+                        name: ws_name,
+                        classes: Some(classes),
+                    });
                 }
             });
         }
