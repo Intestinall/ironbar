@@ -428,12 +428,20 @@ impl Module<gtk::Box> for WorkspacesModule {
                         btn.set_workspace_id(workspace.id);
                         btn.set_monitor(&workspace.monitor);
                         btn.set_open_state(workspace.visibility.into());
-                        let label = item_context.format_label(&workspace.name, workspace.index, Some(workspace.classes));
+                        let label = item_context.format_label(
+                            &workspace.name,
+                            workspace.index,
+                            Some(workspace.classes),
+                        );
                         btn.set_label(&label);
 
                         btn.button().set_tag("workspace_index", workspace.index);
                     } else if let Some(btn) = button_map.find_button_mut(&workspace) {
-                        let label = item_context.format_label(&workspace.name, workspace.index, Some(workspace.classes));
+                        let label = item_context.format_label(
+                            &workspace.name,
+                            workspace.index,
+                            Some(workspace.classes),
+                        );
                         btn.set_label(&label);
                         btn.set_monitor(&workspace.monitor);
                         btn.button().set_tag("workspace_index", workspace.index);
@@ -554,8 +562,7 @@ impl Module<gtk::Box> for WorkspacesModule {
                         }
                     }
                     WorkspaceUpdate::Rename { id, name, classes }
-                    | WorkspaceUpdate::AddWindow { id, name, classes }
-                    | WorkspaceUpdate::RemoveWindow { id, name, classes }
+                    | WorkspaceUpdate::RefreshWorkspace { id, name, classes }
                         if has_initialized =>
                     {
                         let button = if let Some(button) = button_map.get_mut(&Identifier::Id(id)) {
