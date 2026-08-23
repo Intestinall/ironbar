@@ -89,6 +89,7 @@ impl From<Node> for Workspace {
             name: node.name.unwrap_or_default(),
             monitor: node.output.unwrap_or_default(),
             visibility,
+            classes: Default::default(),
         }
     }
 }
@@ -103,6 +104,7 @@ impl From<swayipc_async::Workspace> for Workspace {
             name: workspace.name,
             monitor: workspace.output,
             visibility,
+            classes: Default::default(),
         }
     }
 }
@@ -153,6 +155,7 @@ impl From<WorkspaceEvent> for WorkspaceUpdate {
                     Self::Rename {
                         id: node.id,
                         name: node.name.unwrap_or_default(),
+                        classes: None,
                     }
                 } else {
                     Self::Unknown

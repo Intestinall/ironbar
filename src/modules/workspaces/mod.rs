@@ -20,6 +20,8 @@ use std::rc::Rc;
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
+const ICON_MAP_DEFAULT: &str = "";
+
 #[derive(Debug, Deserialize, Default, Clone, Copy, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
@@ -102,6 +104,9 @@ pub struct WorkspacesModule {
     /// it will fall back to using its actual name.
     #[serde(default)]
     name_map: HashMap<String, String>,
+
+    #[serde(default)]
+    icon_map: HashMap<String, String>,
 
     /// Workspaces which should always be shown.
     /// This can either be an array of workspace names,
@@ -188,6 +193,7 @@ impl Default for WorkspacesModule {
     fn default() -> Self {
         Self {
             name_map: HashMap::default(),
+            icon_map: HashMap::default(),
             favorites: Favorites::default(),
             hidden: vec![],
             all_monitors: false,
@@ -203,6 +209,7 @@ impl Default for WorkspacesModule {
 #[derive(Debug, Clone)]
 pub struct WorkspaceItemContext {
     name_map: HashMap<String, String>,
+    icon_map: HashMap<String, String>,
     icon_size: i32,
     image_provider: image::Provider,
     tx: mpsc::Sender<i64>,
@@ -211,7 +218,7 @@ pub struct WorkspaceItemContext {
 }
 
 impl WorkspaceItemContext {
-    pub fn format_label(&self, name: &str, index: i64) -> String {
+    pub fn format_label(&self, name: &str, index: i64, classes: Option<Vec<String>>) -> String {
         let label = self.name_map.get(name).map_or(name, String::as_str);
 
         let is_named = name != index.to_string();
@@ -221,10 +228,39 @@ impl WorkspaceItemContext {
             &self.format_unnamed
         };
 
-        format
+        let rendered = format
             .replace("{label}", label)
             .replace("{name}", name)
-            .replace("{index}", &index.to_string())
+            .replace("{index}", &index.to_string());
+
+        if format.contains("{icons}") {
+            if let Some(classes) = classes {
+                let icons = self.classes_to_label(classes);
+                return rendered.replace("{icons}", &icons);
+            } else {
+                warn!("{{icons}} is used but the compositor hasn't implemented the feature yet")
+            }
+        }
+        rendered
+    }
+
+    fn classes_to_label(&self, classes: Vec<String>) -> String {
+        let mut icons_string = String::new();
+        let default_icon = self
+            .icon_map
+            .get("<default>")
+            .map(|s| s.as_str())
+            .unwrap_or(ICON_MAP_DEFAULT);
+        for class in classes {
+            let icon = self
+                .icon_map
+                .get(class.as_str())
+                .map(|s| s.as_str())
+                .unwrap_or(default_icon);
+            icons_string.push_str(icon);
+            icons_string.push_str("  ");
+        }
+        icons_string.trim_end().to_string()
     }
 }
 
@@ -330,6 +366,7 @@ impl Module<gtk::Box> for WorkspacesModule {
 
         let item_context = WorkspaceItemContext {
             name_map: self.name_map.clone(),
+            icon_map: self.icon_map.clone(),
             icon_size: self.icon_size,
             image_provider: context.ironbar.image_provider(),
             tx: context.controller_tx.clone(),
@@ -360,6 +397,7 @@ impl Module<gtk::Box> for WorkspacesModule {
                 favorite,
                 info.output_name,
                 OpenState::Closed,
+                Some(vec![]),
                 &item_context,
             );
 
@@ -390,12 +428,20 @@ impl Module<gtk::Box> for WorkspacesModule {
                         btn.set_workspace_id(workspace.id);
                         btn.set_monitor(&workspace.monitor);
                         btn.set_open_state(workspace.visibility.into());
-                        let label = item_context.format_label(&workspace.name, workspace.index);
+                        let label = item_context.format_label(
+                            &workspace.name,
+                            workspace.index,
+                            Some(workspace.classes),
+                        );
                         btn.set_label(&label);
 
                         btn.button().set_tag("workspace_index", workspace.index);
                     } else if let Some(btn) = button_map.find_button_mut(&workspace) {
-                        let label = item_context.format_label(&workspace.name, workspace.index);
+                        let label = item_context.format_label(
+                            &workspace.name,
+                            workspace.index,
+                            Some(workspace.classes),
+                        );
                         btn.set_label(&label);
                         btn.set_monitor(&workspace.monitor);
                         btn.button().set_tag("workspace_index", workspace.index);
@@ -406,6 +452,7 @@ impl Module<gtk::Box> for WorkspacesModule {
                             &workspace.name,
                             &workspace.monitor,
                             workspace.visibility.into(),
+                            Some(workspace.classes),
                             &item_context,
                         );
 
@@ -514,7 +561,10 @@ impl Module<gtk::Box> for WorkspacesModule {
                             }
                         }
                     }
-                    WorkspaceUpdate::Rename { id, name } if has_initialized => {
+                    WorkspaceUpdate::Rename { id, name, classes }
+                    | WorkspaceUpdate::RefreshWorkspace { id, name, classes }
+                        if has_initialized =>
+                    {
                         let button = if let Some(button) = button_map.get_mut(&Identifier::Id(id)) {
                             Some(button)
                         } else {
@@ -528,7 +578,7 @@ impl Module<gtk::Box> for WorkspacesModule {
                                 .copied()
                                 .unwrap_or(0);
 
-                            let display_name = item_context.format_label(&name, index);
+                            let display_name = item_context.format_label(&name, index, classes);
 
                             button.set_label(&display_name);
                             button.button().set_widget_name(&name);

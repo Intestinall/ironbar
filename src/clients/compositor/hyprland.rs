@@ -11,13 +11,15 @@ use hyprland::data::{Devices, Workspace as HWorkspace, Workspaces};
 use hyprland::dispatch::{Dispatch, DispatchType, WorkspaceIdentifierWithSpecial};
 use hyprland::event_listener::EventListener;
 use hyprland::prelude::*;
-use hyprland::shared::{HyprDataVec, WorkspaceType};
+use hyprland::shared::{Address, HyprDataVec, WorkspaceType};
 #[cfg(feature = "workspaces+hyprland")]
 use serde::Deserialize;
+use std::collections::HashMap;
 #[cfg(feature = "workspaces+hyprland")]
 use std::io::{Read, Write};
 #[cfg(feature = "workspaces+hyprland")]
 use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast::{Receiver, Sender, channel};
 use tracing::{debug, error, info, warn};
 
@@ -42,6 +44,9 @@ pub struct Client {
     workspace: TxRx<WorkspaceUpdate>,
 
     #[cfg(feature = "workspaces+hyprland")]
+    window_cache: Arc<Mutex<WindowCache>>,
+
+    #[cfg(feature = "workspaces+hyprland")]
     use_lua_dispatch: bool,
 
     #[cfg(feature = "keyboard+hyprland")]
@@ -51,11 +56,89 @@ pub struct Client {
     bindmode: TxRx<BindModeUpdate>,
 }
 
+#[derive(Debug)]
+struct WindowCacheRecord {
+    workspace_id: i64,
+    workspace_name: String,
+    class: String,
+}
+
+#[derive(Debug)]
+struct WindowCache {
+    inner: HashMap<Address, WindowCacheRecord>,
+}
+
+impl WindowCache {
+    pub fn new() -> Self {
+        let mut inner = HashMap::new();
+        if let Ok(clients) = hyprland::data::Clients::get() {
+            for client in clients {
+                inner.insert(
+                    client.address,
+                    WindowCacheRecord {
+                        workspace_id: client.workspace.id as i64,
+                        workspace_name: client.workspace.name,
+                        class: client.class,
+                    },
+                );
+            }
+        }
+        Self { inner }
+    }
+
+    pub fn insert(
+        &mut self,
+        address: Address,
+        workspace_id: i64,
+        workspace_name: String,
+        class: String,
+    ) {
+        self.inner.insert(
+            address,
+            WindowCacheRecord {
+                workspace_id,
+                workspace_name,
+                class,
+            },
+        );
+    }
+
+    pub fn remove_entry(&mut self, address: &Address) -> Option<(Address, WindowCacheRecord)> {
+        self.inner.remove_entry(address)
+    }
+
+    pub fn get_classes_for_workspace(&self, workspace_id: i64) -> Vec<String> {
+        self.inner
+            .values()
+            .filter(|r| r.workspace_id == workspace_id)
+            .map(|r| r.class.clone())
+            .collect()
+    }
+
+    pub fn update_class(
+        &mut self,
+        address: &Address,
+        new_class: String,
+    ) -> Option<(i64, String, Vec<String>)> {
+        let (ws_id, ws_name) = {
+            let record = self.inner.get_mut(address)?;
+            if record.class == new_class {
+                return None;
+            }
+            record.class = new_class;
+            (record.workspace_id, record.workspace_name.clone())
+        };
+        Some((ws_id, ws_name, self.get_classes_for_workspace(ws_id)))
+    }
+}
+
 impl Client {
     pub(crate) fn new() -> Self {
         let instance = Self {
             #[cfg(feature = "workspaces+hyprland")]
             workspace: TxRx::new(),
+            #[cfg(feature = "workspaces+hyprland")]
+            window_cache: arc_mut!(WindowCache::new()),
             #[cfg(feature = "workspaces+hyprland")]
             use_lua_dispatch: detect_lua_config(),
             #[cfg(feature = "keyboard+hyprland")]
@@ -74,6 +157,9 @@ impl Client {
         #[cfg(feature = "workspaces+hyprland")]
         let workspace_tx = self.workspace.tx.clone();
 
+        #[cfg(feature = "workspaces+hyprland")]
+        let window_cache = self.window_cache.clone();
+
         #[cfg(feature = "keyboard+hyprland")]
         let keyboard_layout_tx = self.keyboard_layout.tx.clone();
 
@@ -88,7 +174,7 @@ impl Client {
 
             // cache the active workspace since Hyprland doesn't give us the prev active
             #[cfg(feature = "workspaces+hyprland")]
-            Self::listen_workspace_events(&workspace_tx, &mut event_listener, &lock);
+            Self::listen_workspace_events(&workspace_tx, &mut event_listener, &window_cache, &lock);
 
             #[cfg(feature = "keyboard+hyprland")]
             Self::listen_keyboard_events(&keyboard_layout_tx, &mut event_listener, &lock);
@@ -106,6 +192,7 @@ impl Client {
     fn listen_workspace_events(
         tx: &Sender<WorkspaceUpdate>,
         event_listener: &mut EventListener,
+        window_cache: &Arc<Mutex<WindowCache>>,
         lock: &std::sync::Arc<std::sync::Mutex<()>>,
     ) {
         let active = Self::get_active_workspace().map_or_else(
@@ -121,15 +208,18 @@ impl Client {
             let tx = tx.clone();
             let lock = lock.clone();
             let active = active.clone();
+            let window_cache = window_cache.clone();
 
             event_listener.add_workspace_added_handler(move |event| {
                 let _lock = lock!(lock);
                 debug!("Added workspace: {event:?}");
+                let window_cache = lock!(window_cache);
 
                 let workspace_name = get_workspace_name(event.name);
                 let prev_workspace = lock!(active);
 
-                let workspace = Self::get_workspace(&workspace_name, prev_workspace.as_ref());
+                let workspace =
+                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &window_cache);
 
                 match workspace {
                     Ok(Some(workspace)) => {
@@ -145,9 +235,11 @@ impl Client {
             let tx = tx.clone();
             let lock = lock.clone();
             let active = active.clone();
+            let window_cache = window_cache.clone();
 
             event_listener.add_workspace_changed_handler(move |event| {
                 let _lock = lock!(lock);
+                let window_cache = lock!(window_cache);
 
                 let mut prev_workspace = lock!(active);
 
@@ -157,7 +249,8 @@ impl Client {
                 );
 
                 let workspace_name = get_workspace_name(event.name);
-                let workspace = Self::get_workspace(&workspace_name, prev_workspace.as_ref());
+                let workspace =
+                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &window_cache);
 
                 match workspace {
                     Ok(Some(workspace)) if !workspace.visibility.is_focused() => {
@@ -176,6 +269,7 @@ impl Client {
             let tx = tx.clone();
             let lock = lock.clone();
             let active = active.clone();
+            let window_cache = window_cache.clone();
 
             event_listener.add_active_monitor_changed_handler(move |event_data| {
                 let _lock = lock!(lock);
@@ -183,6 +277,7 @@ impl Client {
                     warn!("Received active monitor change with no workspace name");
                     return;
                 };
+                let window_cache = lock!(window_cache);
 
                 let mut prev_workspace = lock!(active);
 
@@ -192,7 +287,8 @@ impl Client {
                 );
 
                 let workspace_name = get_workspace_name(workspace_type);
-                let workspace = Self::get_workspace(&workspace_name, prev_workspace.as_ref());
+                let workspace =
+                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &window_cache);
 
                 match workspace {
                     Ok(Some(workspace)) if !workspace.visibility.is_focused() => {
@@ -210,10 +306,13 @@ impl Client {
         {
             let tx = tx.clone();
             let lock = lock.clone();
+            let active = active.clone();
+            let window_cache = window_cache.clone();
 
             event_listener.add_workspace_moved_handler(move |event_data| {
                 let _lock = lock!(lock);
                 let workspace_type = event_data.name;
+                let window_cache = lock!(window_cache);
 
                 let mut prev_workspace = lock!(active);
                 debug!(
@@ -222,7 +321,8 @@ impl Client {
                 );
 
                 let workspace_name = get_workspace_name(workspace_type);
-                let workspace = Self::get_workspace(&workspace_name, prev_workspace.as_ref());
+                let workspace =
+                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &window_cache);
 
                 match workspace {
                     Ok(Some(workspace)) => {
@@ -242,14 +342,17 @@ impl Client {
         {
             let tx = tx.clone();
             let lock = lock.clone();
+            let window_cache = window_cache.clone();
 
             event_listener.add_workspace_renamed_handler(move |data| {
                 let _lock = lock!(lock);
                 debug!("Received workspace rename: {data:?}");
+                let window_cache = lock!(window_cache);
 
                 tx.send_expect(WorkspaceUpdate::Rename {
                     id: data.id as i64,
                     name: data.name,
+                    classes: Some(window_cache.get_classes_for_workspace(data.id as i64)),
                 });
             });
         }
@@ -291,6 +394,154 @@ impl Client {
                         });
                     },
                 );
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let lock = lock.clone();
+            let window_cache = window_cache.clone();
+
+            event_listener.add_window_opened_handler(move |window_opened_event| {
+                let _lock = lock!(lock);
+                let mut window_cache = lock!(window_cache);
+
+                // TODO: Debug is bad
+                debug!("Received window opened: {window_opened_event:?}");
+                let workspace =
+                    Self::get_workspace(&window_opened_event.workspace_name, None, &window_cache);
+
+                match workspace {
+                    Ok(Some(workspace)) => {
+                        window_cache.insert(
+                            window_opened_event.window_address,
+                            workspace.id,
+                            window_opened_event.workspace_name,
+                            window_opened_event.window_class,
+                        );
+                        tx.send_expect(WorkspaceUpdate::RefreshWorkspace {
+                            id: workspace.id,
+                            name: workspace.name,
+                            classes: Some(window_cache.get_classes_for_workspace(workspace.id)),
+                        });
+                    }
+                    Ok(None) => {
+                        error!("Unable to locate workspace");
+                    }
+                    Err(e) => error!("Failed to get workspace: {e:#}"),
+                }
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let lock = lock.clone();
+            let window_cache = window_cache.clone();
+
+            event_listener.add_window_closed_handler(move |window_closed_address| {
+                let _lock = lock!(lock);
+                let mut window_cache = lock!(window_cache);
+
+                match window_cache.remove_entry(&window_closed_address) {
+                    Some((_window_address, record)) => {
+                        debug!("Window closed with address {window_closed_address}");
+                        tx.send_expect(WorkspaceUpdate::RefreshWorkspace {
+                            id: record.workspace_id,
+                            name: record.workspace_name,
+                            classes: Some(window_cache.get_classes_for_workspace(record.workspace_id))
+                        });
+                    }
+                    None => {
+                        error!("Window closed with address {window_closed_address} but not found in the cache");
+                    }
+                };
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let lock = lock.clone();
+            let window_cache = window_cache.clone();
+
+            event_listener.add_window_moved_handler(move |window_moved_event| {
+                let _lock = lock!(lock);
+                let workspace_type = window_moved_event.workspace_name;
+                let mut window_cache = lock!(window_cache);
+
+                let prev_workspace = lock!(active);
+
+                let workspace_name = get_workspace_name(workspace_type);
+                let new_workspace =
+                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &window_cache);
+
+                match new_workspace {
+                    Ok(Some(new_workspace)) => {
+                        match window_cache.remove_entry(&window_moved_event.window_address) {
+                            Some((window_address, old_record)) => {
+                                debug!(
+                                    "Window moved from {} to {}",
+                                    &old_record.workspace_name, &new_workspace.name
+                                );
+                                window_cache.insert(
+                                    window_address,
+                                    new_workspace.id,
+                                    new_workspace.name.clone(),
+                                    old_record.class,
+                                );
+                                tx.send_expect(WorkspaceUpdate::RefreshWorkspace {
+                                    id: old_record.workspace_id,
+                                    name: old_record.workspace_name,
+                                    classes: Some(
+                                        window_cache
+                                            .get_classes_for_workspace(old_record.workspace_id),
+                                    ),
+                                });
+                                tx.send_expect(WorkspaceUpdate::RefreshWorkspace {
+                                    id: new_workspace.id,
+                                    name: new_workspace.name,
+                                    classes: Some(
+                                        window_cache.get_classes_for_workspace(new_workspace.id),
+                                    ),
+                                });
+                            }
+                            None => {
+                                error!(
+                                    "Window moved to {}, but old workspace was unknown",
+                                    new_workspace.name
+                                );
+                            }
+                        };
+                    }
+                    Ok(None) => {
+                        error!("Unable to locate workspace");
+                    }
+                    Err(e) => error!("Failed to get workspace: {e:#}"),
+                }
+            });
+        }
+        // Handles dynamic class changes
+        {
+            let tx = tx.clone();
+            let lock = lock.clone();
+            let window_cache = window_cache.clone();
+
+            event_listener.add_active_window_changed_handler(move |event_data| {
+                let _lock = lock!(lock);
+
+                let Some(event_data) = event_data.filter(|e| !e.class.is_empty()) else {
+                    return;
+                };
+
+                let mut window_cache = lock!(window_cache);
+                if let Some((ws_id, ws_name, classes)) =
+                    window_cache.update_class(&event_data.address, event_data.class)
+                {
+                    tx.send_expect(WorkspaceUpdate::RefreshWorkspace {
+                        id: ws_id,
+                        name: ws_name,
+                        classes: Some(classes),
+                    });
+                }
             });
         }
     }
@@ -391,14 +642,19 @@ impl Client {
 
     /// Gets a workspace by name from the server, given the active workspace if known.
     #[cfg(feature = "workspaces+hyprland")]
-    fn get_workspace(name: &str, active: Option<&Workspace>) -> Result<Option<Workspace>> {
+    fn get_workspace(
+        name: &str,
+        active: Option<&Workspace>,
+        window_cache: &WindowCache,
+    ) -> Result<Option<Workspace>> {
         let workspace = Workspaces::get()?.into_iter().find_map(|w| {
             if w.name == name {
                 let vis = Visibility::from((&w, active.map(|w| w.name.as_ref()), &|w| {
                     create_is_visible()(w)
                 }));
-
-                Some(Workspace::from((vis, w)))
+                let mut ws = Workspace::from((vis, w));
+                ws.classes = window_cache.get_classes_for_workspace(ws.id);
+                Some(ws)
             } else {
                 None
             }
@@ -438,11 +694,15 @@ impl super::WorkspaceClient for Client {
 
         match Workspaces::get() {
             Ok(workspaces) => {
+                let cache = lock!(self.window_cache);
+
                 let workspaces = workspaces
                     .into_iter()
                     .map(|w| {
                         let vis = Visibility::from((&w, active_id.as_deref(), &is_visible));
-                        Workspace::from((vis, w))
+                        let mut ws = Workspace::from((vis, w));
+                        ws.classes = cache.get_classes_for_workspace(ws.id);
+                        ws
                     })
                     .collect();
 
@@ -573,6 +833,7 @@ impl From<(Visibility, HWorkspace)> for Workspace {
             name: workspace.name,
             monitor: workspace.monitor,
             visibility,
+            classes: vec![],
         }
     }
 }
