@@ -213,13 +213,13 @@ impl Client {
             event_listener.add_workspace_added_handler(move |event| {
                 let _lock = lock!(lock);
                 debug!("Added workspace: {event:?}");
-                let cache = lock!(window_cache);
+                let window_cache = lock!(window_cache);
 
                 let workspace_name = get_workspace_name(event.name);
                 let prev_workspace = lock!(active);
 
                 let workspace =
-                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &cache);
+                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &window_cache);
 
                 match workspace {
                     Ok(Some(workspace)) => {
@@ -239,7 +239,7 @@ impl Client {
 
             event_listener.add_workspace_changed_handler(move |event| {
                 let _lock = lock!(lock);
-                let cache = lock!(window_cache);
+                let window_cache = lock!(window_cache);
 
                 let mut prev_workspace = lock!(active);
 
@@ -250,7 +250,7 @@ impl Client {
 
                 let workspace_name = get_workspace_name(event.name);
                 let workspace =
-                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &cache);
+                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &window_cache);
 
                 match workspace {
                     Ok(Some(workspace)) if !workspace.visibility.is_focused() => {
@@ -277,7 +277,7 @@ impl Client {
                     warn!("Received active monitor change with no workspace name");
                     return;
                 };
-                let cache = lock!(window_cache);
+                let window_cache = lock!(window_cache);
 
                 let mut prev_workspace = lock!(active);
 
@@ -288,7 +288,7 @@ impl Client {
 
                 let workspace_name = get_workspace_name(workspace_type);
                 let workspace =
-                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &cache);
+                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &window_cache);
 
                 match workspace {
                     Ok(Some(workspace)) if !workspace.visibility.is_focused() => {
@@ -312,7 +312,7 @@ impl Client {
             event_listener.add_workspace_moved_handler(move |event_data| {
                 let _lock = lock!(lock);
                 let workspace_type = event_data.name;
-                let cache = lock!(window_cache);
+                let window_cache = lock!(window_cache);
 
                 let mut prev_workspace = lock!(active);
                 debug!(
@@ -322,7 +322,7 @@ impl Client {
 
                 let workspace_name = get_workspace_name(workspace_type);
                 let workspace =
-                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &cache);
+                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &window_cache);
 
                 match workspace {
                     Ok(Some(workspace)) => {
@@ -347,12 +347,12 @@ impl Client {
             event_listener.add_workspace_renamed_handler(move |data| {
                 let _lock = lock!(lock);
                 debug!("Received workspace rename: {data:?}");
-                let cache = lock!(window_cache);
+                let window_cache = lock!(window_cache);
 
                 tx.send_expect(WorkspaceUpdate::Rename {
                     id: data.id as i64,
                     name: data.name,
-                    classes: Some(cache.get_classes_for_workspace(data.id as i64)),
+                    classes: Some(window_cache.get_classes_for_workspace(data.id as i64)),
                 });
             });
         }
@@ -404,16 +404,16 @@ impl Client {
 
             event_listener.add_window_opened_handler(move |window_opened_event| {
                 let _lock = lock!(lock);
-                let mut cache = lock!(window_cache);
+                let mut window_cache = lock!(window_cache);
 
                 // TODO: Debug is bad
                 debug!("Received window opened: {window_opened_event:?}");
                 let workspace =
-                    Self::get_workspace(&window_opened_event.workspace_name, None, &cache);
+                    Self::get_workspace(&window_opened_event.workspace_name, None, &window_cache);
 
                 match workspace {
                     Ok(Some(workspace)) => {
-                        cache.insert(
+                        window_cache.insert(
                             window_opened_event.window_address,
                             workspace.id,
                             window_opened_event.workspace_name,
@@ -422,7 +422,7 @@ impl Client {
                         tx.send_expect(WorkspaceUpdate::RefreshWorkspace {
                             id: workspace.id,
                             name: workspace.name,
-                            classes: Some(cache.get_classes_for_workspace(workspace.id)),
+                            classes: Some(window_cache.get_classes_for_workspace(workspace.id)),
                         });
                     }
                     Ok(None) => {
@@ -440,15 +440,15 @@ impl Client {
 
             event_listener.add_window_closed_handler(move |window_closed_address| {
                 let _lock = lock!(lock);
-                let mut cache = lock!(window_cache);
+                let mut window_cache = lock!(window_cache);
 
-                match cache.remove_entry(&window_closed_address) {
+                match window_cache.remove_entry(&window_closed_address) {
                     Some((_window_address, record)) => {
                         debug!("Window closed with address {window_closed_address}");
                         tx.send_expect(WorkspaceUpdate::RefreshWorkspace {
                             id: record.workspace_id,
                             name: record.workspace_name,
-                            classes: Some(cache.get_classes_for_workspace(record.workspace_id))
+                            classes: Some(window_cache.get_classes_for_workspace(record.workspace_id))
                         });
                     }
                     None => {
@@ -466,23 +466,23 @@ impl Client {
             event_listener.add_window_moved_handler(move |window_moved_event| {
                 let _lock = lock!(lock);
                 let workspace_type = window_moved_event.workspace_name;
-                let mut cache = lock!(window_cache);
+                let mut window_cache = lock!(window_cache);
 
                 let prev_workspace = lock!(active);
 
                 let workspace_name = get_workspace_name(workspace_type);
                 let new_workspace =
-                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &cache);
+                    Self::get_workspace(&workspace_name, prev_workspace.as_ref(), &window_cache);
 
                 match new_workspace {
                     Ok(Some(new_workspace)) => {
-                        match cache.remove_entry(&window_moved_event.window_address) {
+                        match window_cache.remove_entry(&window_moved_event.window_address) {
                             Some((window_address, old_record)) => {
                                 debug!(
                                     "Window moved from {} to {}",
                                     &old_record.workspace_name, &new_workspace.name
                                 );
-                                cache.insert(
+                                window_cache.insert(
                                     window_address,
                                     new_workspace.id,
                                     new_workspace.name.clone(),
@@ -492,14 +492,15 @@ impl Client {
                                     id: old_record.workspace_id,
                                     name: old_record.workspace_name,
                                     classes: Some(
-                                        cache.get_classes_for_workspace(old_record.workspace_id),
+                                        window_cache
+                                            .get_classes_for_workspace(old_record.workspace_id),
                                     ),
                                 });
                                 tx.send_expect(WorkspaceUpdate::RefreshWorkspace {
                                     id: new_workspace.id,
                                     name: new_workspace.name,
                                     classes: Some(
-                                        cache.get_classes_for_workspace(new_workspace.id),
+                                        window_cache.get_classes_for_workspace(new_workspace.id),
                                     ),
                                 });
                             }
@@ -531,9 +532,9 @@ impl Client {
                     return;
                 };
 
-                let mut cache = lock!(window_cache);
+                let mut window_cache = lock!(window_cache);
                 if let Some((ws_id, ws_name, classes)) =
-                    cache.update_class(&event_data.address, event_data.class)
+                    window_cache.update_class(&event_data.address, event_data.class)
                 {
                     tx.send_expect(WorkspaceUpdate::RefreshWorkspace {
                         id: ws_id,
