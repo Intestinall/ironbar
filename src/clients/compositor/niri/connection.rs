@@ -64,7 +64,7 @@ impl From<&Workspace> for IronWorkspace {
             } else {
                 Visibility::Hidden
             },
-            classes: vec![],
+            classes: Default::default(),
         }
     }
 }

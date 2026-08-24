@@ -20,8 +20,6 @@ use std::rc::Rc;
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
-const ICON_MAP_DEFAULT: &str = "";
-
 #[derive(Debug, Deserialize, Default, Clone, Copy, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "extras", derive(schemars::JsonSchema))]
@@ -245,22 +243,20 @@ impl WorkspaceItemContext {
     }
 
     fn classes_to_label(&self, classes: Vec<String>) -> String {
-        let mut icons_string = String::new();
         let default_icon = self
             .icon_map
             .get("<default>")
             .map(|s| s.as_str())
-            .unwrap_or(ICON_MAP_DEFAULT);
-        for class in classes {
-            let icon = self
-                .icon_map
-                .get(class.as_str())
-                .map(|s| s.as_str())
-                .unwrap_or(default_icon);
-            icons_string.push_str(icon);
-            icons_string.push_str("  ");
-        }
-        icons_string.trim_end().to_string()
+            .unwrap_or("?");
+        classes
+            .iter()
+            .map(|class| {
+                self.icon_map
+                    .get(class.as_str())
+                    .map_or(default_icon, |s| s.as_str())
+            })
+            .collect::<Vec<_>>() // Gathers references (&str)
+            .join("  ")
     }
 }
 
